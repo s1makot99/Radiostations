@@ -1,0 +1,418 @@
+﻿@page "/"
+@rendermode RenderMode.InteractiveServer
+@using Radiostations.Models
+@using Radiostations.Services
+@using System.Text
+@using Microsoft.AspNetCore.Components.Forms
+@inject IConfiguration Configuration
+@inject IServiceProvider ServiceProvider
+@inject XmlParserService XmlParser
+@inject SystemTestingService TestingService
+@inject IJSRuntime JS
+@implements IDisposable
+
+<div class="app-container">
+    <div class="container-main">
+        <div class="row">
+            @if (isConnected && currentProvider is IDatabaseAdmin admin)
+            {
+                <div class="col-lg-3 col-md-4">
+                    <div class="sidebar">
+                        <div class="list-group">
+                            <div class="list-group-item bg-primary text-white">
+                                <h5 class="mb-0">⚙️ Администрирование</h5>
+                            </div>
+                            <button @onclick="CreateStoredProcedures" class="list-group-item list-group-item-action">
+                                📦 Создать хранимые процедуры
+                            </button>
+                            <button @onclick="CreateBackup" class="list-group-item list-group-item-action">
+                                💾 Создать резервную копию
+                            </button>
+                            <div class="list-group-item">
+                                <label class="form-label small">Восстановление из бэкапа:</label>
+                                <InputFile OnChange="OnBackupSelected" accept=".sql" class="form-control form-control-sm" />
+                            </div>
+                            <button @onclick="ShowStatistics" class="list-group-item list-group-item-action">
+                                📊 Статистика БД
+                            </button>
+                            <button @onclick="ShowAuditLog" class="list-group-item list-group-item-action">
+                                📝 Журнал аудита
+                            </button>
+                            <button @onclick="ShowUserActivityMonitor" class="list-group-item list-group-item-action">
+                                📈 Мониторинг активности
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            <div class="@(isConnected && currentProvider is IDatabaseAdmin ? "col-lg-9 col-md-8" : "col-12")">
+                <div class="main-content">
+                    <h2>Radiostations - Управление БД</h2>
+
+                    <div class="row mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label">Выберите провайдер БД:</label>
+                            <select value="@selectedProvider" @onchange="OnProviderChanged" disabled="@isBusy" class="form-select">
+                                @foreach (var provider in providerList)
+                                {
+                                    <option value="@provider">@provider</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Строка подключения:</label>
+                            <input readonly class="form-control" value="@connectionString" />
+                        </div>
+                        <div class="col-md-2 d-flex align-items-end">
+                            <button @onclick="ToggleConnection" disabled="@isBusy" class="btn @(isConnected ? "btn-danger" : "btn-success") w-100">
+                                @(isConnected ? "Отключить" : "Соединить")
+                            </button>
+                        </div>
+                    </div>
+
+                    @if (isConnected)
+                    {
+                        <div class="row mb-4">
+                            <div class="col">
+                                <div class="action-buttons">
+                                    <button @onclick="CreateDatabase" disabled="@isBusy" class="btn btn-primary btn-action">🏗️ Создать БД</button>
+                                    <button @onclick="DeleteDatabase" disabled="@isBusy" class="btn btn-danger btn-action">🗑️ Удалить БД</button>
+                                    <button @onclick="ClearDatabase" disabled="@isBusy" class="btn btn-warning btn-action">🧹 Очистить таблицу</button>
+                                    <button @onclick="ShowFolderInput" disabled="@isBusy" class="btn btn-info btn-action">📂 Загрузить XML</button>
+                                    <button @onclick="RunSystemTests" disabled="@isBusy" class="btn btn-dark btn-action">🧪 Тестирование ИС</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        @if (showFolderInput)
+                        {
+                            <div class="row mb-3">
+                                <div class="col">
+                                    <div class="input-group folder-input">
+                                        <span class="input-group-text">📁</span>
+                                        <input type="text" @bind="xmlFolderPath" placeholder="Путь к папке с XML-файлами" class="form-control" />
+                                        <button @onclick="LoadDataFromFolder" class="btn btn-success">Выполнить загрузку</button>
+                                        <button @onclick="() => showFolderInput = false" class="btn btn-secondary">Отмена</button>
+                                    </div>
+                                </div>
+                            </div>
+                        }
+
+                        @if (showModal)
+                        {
+                            <div class="modal show d-block" tabindex="-1" style="background-color: rgba(0,0,0,0.5)">
+                                <div class="modal-dialog modal-lg modal-dialog-centered">
+                                    <div class="modal-content">
+                                        <div class="modal-header">
+                                            <h5 class="modal-title">@modalTitle</h5>
+                                            <button type="button" class="btn-close" @onclick="CloseModal"></button>
+                                        </div>
+                                        <div class="modal-body">
+                                            <pre class="bg-light p-3 rounded" style="max-height: 500px; overflow-y: auto; white-space: pre-wrap;">@modalContent</pre>
+                                        </div>
+                                        <div class="modal-footer">
+                                            <button type="button" class="btn btn-secondary" @onclick="CloseModal">Закрыть</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        }
+
+                        <div class="row">
+                            <div class="col">
+                                <h4>Список объектов (@objects.Count записей)</h4>
+                                @if (objects.Any())
+                                {
+                                    <div class="table-responsive">
+                                        <table class="table table-striped table-sm table-hover">
+                                            <thead class="table-dark">
+                                                <tr><th>ObjectID</th><th>ObjectName</th><th>Location</th><th>EtsName</th><th>DocID</th></tr>
+                                            </thead>
+                                            <tbody>
+                                                @foreach (var obj in objects.Take(100))
+                                                {
+                                                    <tr>
+                                                        <td>@obj.ObjectID</td>
+                                                        <td>@obj.ObjectName</td>
+                                                        <td>@obj.ObjectLocationName</td>
+                                                        <td>@obj.EtsName</td>
+                                                        <td>@obj.DocumentID</td>
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="alert alert-info">Нет данных. Сначала создайте БД, затем загрузите XML или запустите тестирование.</div>
+                                }
+                            </div>
+                        </div>
+                    }
+
+                    <div class="mt-3">
+                        <small class="text-muted">Статус: @statusMessage</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+@code {
+    private string _selectedProvider = "SQLite";
+    private string selectedProvider
+    {
+        get => _selectedProvider;
+        set { if (_selectedProvider != value) { _selectedProvider = value; UpdateConnectionString(); StateHasChanged(); } }
+    }
+    private readonly List<string> providerList = new() { "SQLite", "MySQL", "MSSQL", "PostgreSQL" };
+    private string connectionString = "";
+    private bool isConnected = false;
+    private bool isBusy = false;
+    private IDatabaseProvider? currentProvider;
+    private List<ObjectRecord> objects = new();
+    private string statusMessage = "Готов к работе. Нажмите 'Соединить' для подключения к БД.";
+    private bool showFolderInput = false;
+    private string xmlFolderPath = string.Empty;
+    private bool showModal = false;
+    private string modalTitle = "";
+    private string modalContent = "";
+
+    protected override void OnInitialized() => UpdateConnectionString();
+    private void UpdateConnectionString() => connectionString = Configuration.GetConnectionString(selectedProvider) ?? "";
+
+    private async Task OnProviderChanged(ChangeEventArgs e)
+    {
+        var newProvider = e.Value?.ToString() ?? "SQLite";
+        if (selectedProvider != newProvider)
+        {
+            if (isConnected) await DisconnectCurrentProvider();
+            selectedProvider = newProvider;
+            statusMessage = $"Выбран провайдер: {selectedProvider}. Нажмите 'Соединить'.";
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task DisconnectCurrentProvider()
+    {
+        if (currentProvider?.IsConnected == true)
+        {
+            try { await currentProvider.DisconnectAsync(); currentProvider = null; } catch { }
+        }
+        isConnected = false;
+        objects.Clear();
+    }
+
+    private void ShowFolderInput() => showFolderInput = true;
+
+    private async Task LoadDataFromFolder()
+    {
+        if (currentProvider == null || string.IsNullOrEmpty(xmlFolderPath) || !Directory.Exists(xmlFolderPath))
+        {
+            statusMessage = "Укажите корректный путь к папке";
+            return;
+        }
+        isBusy = true;
+        StateHasChanged();
+        try
+        {
+            var xmlFiles = Directory.GetFiles(xmlFolderPath, "fa_document_xml_short_*.xml");
+            var totalRecords = 0;
+            foreach (var file in xmlFiles)
+            {
+                foreach (var record in XmlParser.ParseXmlFile(file)) { await currentProvider.UpsertAsync(record); totalRecords++; }
+            }
+            await RefreshObjects();
+            statusMessage = $"Загружено {totalRecords} записей из {xmlFiles.Length} файлов";
+            showFolderInput = false;
+        }
+        catch (Exception ex) { statusMessage = $"Ошибка: {ex.Message}"; }
+        finally { isBusy = false; StateHasChanged(); }
+    }
+
+    private async Task ToggleConnection()
+    {
+        isBusy = true;
+        StateHasChanged();
+        try
+        {
+            if (isConnected) { await DisconnectCurrentProvider(); statusMessage = "Отключено от БД"; }
+            else
+            {
+                currentProvider = selectedProvider switch
+                {
+                    "SQLite" => ServiceProvider.GetRequiredService<SQLiteProvider>(),
+                    "MySQL" => ServiceProvider.GetRequiredService<MySqlProvider>(),
+                    "MSSQL" => ServiceProvider.GetRequiredService<MssqlProvider>(),
+                    "PostgreSQL" => ServiceProvider.GetRequiredService<PostgresProvider>(),
+                    _ => throw new NotSupportedException()
+                };
+                await currentProvider.ConnectAsync(connectionString);
+                isConnected = true;
+                await RefreshObjects();
+                statusMessage = $"Подключено к {selectedProvider}. Записей: {objects.Count}";
+            }
+        }
+        catch (Exception ex) { statusMessage = $"Ошибка: {ex.Message}"; isConnected = false; currentProvider = null; }
+        finally { isBusy = false; StateHasChanged(); }
+    }
+
+    private async Task CreateDatabase()
+    {
+        if (currentProvider == null) return;
+        isBusy = true;
+        try { await currentProvider.CreateDatabaseAsync(); await RefreshObjects(); statusMessage = "БД и таблица созданы"; }
+        catch (Exception ex) { statusMessage = $"Ошибка: {ex.Message}"; }
+        finally { isBusy = false; StateHasChanged(); }
+    }
+
+    private async Task DeleteDatabase()
+    {
+        if (currentProvider == null) return;
+        isBusy = true;
+        try { await currentProvider.DropDatabaseAsync(); objects.Clear(); statusMessage = "БД удалена"; }
+        catch (Exception ex) { statusMessage = $"Ошибка: {ex.Message}"; }
+        finally { isBusy = false; StateHasChanged(); }
+    }
+
+    private async Task ClearDatabase()
+    {
+        if (currentProvider == null) return;
+        isBusy = true;
+        try { await currentProvider.ClearTableAsync(); await RefreshObjects(); statusMessage = "Таблица очищена"; }
+        catch (Exception ex) { statusMessage = $"Ошибка: {ex.Message}"; }
+        finally { isBusy = false; StateHasChanged(); }
+    }
+
+    private async Task RefreshObjects()
+    {
+        if (currentProvider?.IsConnected == true)
+        {
+            try { objects = await currentProvider.GetAllAsync(); } catch { objects.Clear(); }
+        }
+        else objects.Clear();
+        StateHasChanged();
+    }
+
+    private async Task RunSystemTests()
+    {
+        if (currentProvider == null) return;
+        isBusy = true;
+        statusMessage = "Выполняется комплексное тестирование ИС...";
+        StateHasChanged();
+        try
+        {
+            var results = await TestingService.RunAllTestsAsync(currentProvider);
+            await RefreshObjects();
+            modalTitle = $"🧪 Отчет о тестировании ИС ({selectedProvider})";
+            var sb = new StringBuilder();
+            sb.AppendLine("=======================================================================");
+            foreach (var r in results)
+            {
+                var icon = r.Passed ? "✅ PASS" : "❌ FAIL";
+                sb.AppendLine($"[{icon}] {r.TestType} — {r.TestName} ({r.ElapsedMs} мс)");
+                sb.AppendLine($"        Результат: {r.Details}");
+                sb.AppendLine("-----------------------------------------------------------------------");
+            }
+            var passedCount = results.Count(x => x.Passed);
+            sb.AppendLine($"ИТОГО: пройдено {passedCount} из {results.Count} тестов.");
+            sb.AppendLine("=======================================================================");
+            modalContent = sb.ToString();
+            showModal = true;
+            statusMessage = $"Тестирование завершено ({passedCount}/{results.Count})";
+        }
+        catch (Exception ex) { statusMessage = $"Ошибка тестирования: {ex.Message}"; }
+        finally { isBusy = false; StateHasChanged(); }
+    }
+
+    private async Task CreateStoredProcedures()
+    {
+        if (currentProvider is not IDatabaseAdmin admin) return;
+        isBusy = true;
+        try { await admin.CreateStoredProceduresAsync(); modalTitle = "✅ Успешно"; modalContent = "Хранимые процедуры созданы."; showModal = true; }
+        catch (Exception ex) { statusMessage = $"Ошибка: {ex.Message}"; }
+        finally { isBusy = false; StateHasChanged(); }
+    }
+
+    private async Task CreateBackup()
+    {
+        if (currentProvider is not IDatabaseAdmin admin) return;
+        isBusy = true;
+        try { var path = await admin.CreateBackupAsync(); modalTitle = "💾 Бэкап создан"; modalContent = $"Файл: {path}"; showModal = true; }
+        catch (Exception ex) { statusMessage = $"Ошибка: {ex.Message}"; }
+        finally { isBusy = false; StateHasChanged(); }
+    }
+
+    private async Task OnBackupSelected(InputFileChangeEventArgs e)
+    {
+        if (currentProvider is not IDatabaseAdmin admin || e.File == null) return;
+        isBusy = true;
+        try
+        {
+            using var ms = new MemoryStream();
+            await e.File.OpenReadStream(1024 * 1024 * 100).CopyToAsync(ms);
+            await admin.RestoreBackupAsync(ms.ToArray(), e.File.Name);
+            await RefreshObjects();
+            modalTitle = "🔄 Восстановление завершено";
+            modalContent = $"Восстановлено из: {e.File.Name}";
+            showModal = true;
+        }
+        catch (Exception ex) { statusMessage = $"Ошибка: {ex.Message}"; }
+        finally { isBusy = false; StateHasChanged(); }
+    }
+
+    private async Task ShowStatistics()
+    {
+        if (currentProvider is not IDatabaseAdmin admin) return;
+        isBusy = true;
+        try
+        {
+            var stats = await admin.GetStatisticsAsync();
+            modalTitle = "📊 Статистика базы данных";
+            modalContent = string.Join("\n", stats.Select(s => $"{s.Key,-20}: {s.Value}"));
+            showModal = true;
+        }
+        catch (Exception ex) { statusMessage = $"Ошибка: {ex.Message}"; }
+        finally { isBusy = false; StateHasChanged(); }
+    }
+
+    private async Task ShowAuditLog()
+    {
+        if (currentProvider is not IDatabaseAdmin admin) return;
+        isBusy = true;
+        try
+        {
+            var logs = await admin.GetAuditLogAsync(7);
+            modalTitle = "📝 Журнал аудита";
+            modalContent = logs.Any() ? string.Join("\n", logs.Select(l => $"{l["Time"]} | {l["Action"]} | {l["Details"]}")) : "Нет записей.";
+            showModal = true;
+        }
+        catch (Exception ex) { statusMessage = $"Ошибка: {ex.Message}"; }
+        finally { isBusy = false; StateHasChanged(); }
+    }
+
+    private async Task ShowUserActivityMonitor()
+    {
+        if (currentProvider is not IDatabaseAdmin admin) return;
+        isBusy = true;
+        try
+        {
+            var monitor = await admin.GetUserActivityMonitorAsync();
+            modalTitle = "📈 Мониторинг активности";
+            modalContent = $"Разделов мониторинга загружено: {monitor.Count}";
+showModal = true;
+}
+catch (Exception ex) { statusMessage = $"Ошибка: {ex.Message}"; }
+finally { isBusy = false; StateHasChanged(); }
+}
+private void CloseModal() { showModal = false; StateHasChanged(); }
+public void Dispose()
+{
+if (currentProvider?.IsConnected == true)
+{
+try { currentProvider.DisconnectAsync().Wait(); } catch { }
+}
+}
+}
